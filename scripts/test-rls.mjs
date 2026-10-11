@@ -171,6 +171,100 @@ await check("user A can delete their own row", async () => {
   assert(affectedRows === 1, `affected ${affectedRows}`);
 });
 
+// --- onboarding migration -------------------------------------------------
+console.log("\nonboarding: business_name, source_type, upsert\n");
+
+const UPSERT = `
+  insert into business_profiles (user_id, business_name, source_type, source_url, industry)
+  values ($1, $2, $3, $4, $5)
+  on conflict (user_id) do update set
+    business_name = excluded.business_name,
+    source_type   = excluded.source_type,
+    source_url    = excluded.source_url,
+    industry      = excluded.industry
+  returning business_name, source_type`;
+
+await check("user A can upsert (insert) a profile with business_name", async () => {
+  const { rows } = await as(A, UPSERT, [A, "Paws Co", "website", "https://paws.example", "pets"]);
+  assert(rows[0].business_name === "Paws Co", JSON.stringify(rows));
+});
+
+await check("user A can upsert (update) the same profile — still one row", async () => {
+  await as(A, UPSERT, [A, "Paws & Co", "manual", null, "pets"]);
+  const { rows } = await as(A, `select business_name, source_type from business_profiles`);
+  assert(rows.length === 1, `saw ${rows.length} rows`);
+  assert(rows[0].business_name === "Paws & Co" && rows[0].source_type === "manual", JSON.stringify(rows));
+});
+
+await check("user A's upsert targeting user B's user_id is rejected", async () => {
+  await rejects(as(A, UPSERT, [B, "Hijack", "manual", null, "x"]), /row-level security/);
+  const { rows } = await as(B, `select industry from business_profiles`);
+  assert(rows[0].industry === "fitness", JSON.stringify(rows));
+});
+
+for (const value of ["website", "social", "manual"]) {
+  await check(`source_type '${value}' is accepted`, async () => {
+    await as(A, `update business_profiles set source_type = $1`, [value]);
+  });
+}
+
+for (const value of ["tiktok", "", "Website"]) {
+  await check(`source_type '${value}' is rejected by the CHECK constraint`, async () => {
+    await rejects(
+      as(A, `update business_profiles set source_type = $1`, [value]),
+      /business_profiles_source_type_check/,
+    );
+  });
+}
+
+// --- extraction rate limit ------------------------------------------------
+console.log("\nextraction rate limit\n");
+
+const consume = (who) =>
+  as(who, `select public.consume_extraction_quota() as ok`).then((r) => r.rows[0].ok);
+
+await check("user A gets exactly 10 extractions, the 11th is refused", async () => {
+  const results = [];
+  for (let i = 0; i < 11; i++) results.push(await consume(A));
+  assert(results.slice(0, 10).every((r) => r === true), JSON.stringify(results));
+  assert(results[10] === false, `11th call returned ${results[10]}`);
+});
+
+await check("user B's quota is independent of user A's", async () => {
+  assert((await consume(B)) === true, "B was refused");
+});
+
+await check("entries older than an hour no longer count", async () => {
+  await db.query(
+    `update profile_extraction_log set created_at = now() - interval '61 minutes' where user_id = $1`,
+    [A],
+  );
+  assert((await consume(A)) === true, "A still refused after window passed");
+});
+
+await check("users cannot read the log table directly", async () => {
+  const { rows } = await as(A, `select * from profile_extraction_log`);
+  assert(rows.length === 0, `saw ${rows.length} rows`);
+});
+
+await check("users cannot delete their log entries to reset the quota", async () => {
+  const { affectedRows } = await as(A, `delete from profile_extraction_log`);
+  assert(affectedRows === 0, `deleted ${affectedRows}`);
+  const { rows } = await db.query(`select count(*)::int as n from profile_extraction_log where user_id = $1`, [A]);
+  assert(rows[0].n === 11, `log has ${rows[0].n} rows for A`);
+});
+
+await check("users cannot insert log entries for someone else", async () => {
+  await rejects(
+    as(A, `insert into profile_extraction_log (user_id) values ($1)`, [B]),
+    /row-level security/,
+  );
+});
+
+await check("anon cannot call the quota function", async () => {
+  await rejects(as(null, `select public.consume_extraction_quota()`), /permission denied/);
+});
+
 await db.close();
 console.log(failed ? `\n${failed} failed` : "\nall passed");
 process.exit(failed ? 1 : 0);

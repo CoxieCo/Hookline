@@ -8,6 +8,7 @@ export default function Home() {
       <div className="flex gap-4 text-[13px] text-muted">
         <Link href="/login" className="hover:text-fg">Log in</Link>
         <Link href="/signup" className="hover:text-fg">Sign up</Link>
+        <Link href="/onboarding" className="hover:text-fg">Onboarding</Link>
       </div>
     </main>
   );

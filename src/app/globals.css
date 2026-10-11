@@ -14,6 +14,7 @@
   --color-accent-fg: #0b0b12;
   --color-danger: #f2555a;
   --color-success: #4cc38a;
+  --color-warning: #e2a336;
 
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
