@@ -7,14 +7,10 @@ import {
   ModelExtractionSchema,
   type ExtractedProfile,
 } from "@/lib/profile/schema";
+import { acceptsSampling, CLAUDE_MODEL } from "@/lib/claude";
 import { ExtractError } from "./errors";
 
-/** The one place the extraction model is chosen. */
-export const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL?.trim() || "claude-sonnet-4-5";
-
-// Newer models (Opus 4.7+, Sonnet 5, Fable, Mythos) reject sampling params
-// with a 400, so temperature is only sent where it's accepted.
-const REJECTS_SAMPLING = /^claude-(opus-(4-[7-9]|[5-9])|sonnet-[5-9]|fable|mythos)/;
+export { CLAUDE_MODEL };
 
 const SYSTEM_PROMPT = `You build a business profile for an e-commerce or dropshipping brand from content scraped from its website or social profile.
 
@@ -43,7 +39,7 @@ export async function extractProfileWithClaude(sourceUrl: string, content: strin
     response = await client.messages.parse({
       model: CLAUDE_MODEL,
       max_tokens: 8192,
-      ...(REJECTS_SAMPLING.test(CLAUDE_MODEL) ? {} : { temperature: 0 }),
+      ...(acceptsSampling() ? { temperature: 0 } : {}),
       system: SYSTEM_PROMPT,
       messages: [
         {

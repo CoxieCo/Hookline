@@ -21,3 +21,9 @@ next-env.d.ts
 # supabase cli
 /supabase/.temp
 /supabase/.branches
+
+# playwright artifacts (traces can contain session cookies)
+/test-results
+/playwright-report
+
+screenshots/
