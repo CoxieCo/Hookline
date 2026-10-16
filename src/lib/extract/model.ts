@@ -24,6 +24,7 @@ Rules:
 - product_description: one to three sentences on what they sell. Mention specific products or prices only if they appear in the content.
 - target_customer: who the products are for, only if the content states it or makes it clearly evident from how products are positioned.
 - brand_tone: a few adjectives describing the voice of the brand's own copy (e.g. "playful, casual"). Leave empty if there is too little of the brand's own writing to judge.
+- product_facts: short lines, one fact per line (separated by a newline, no bullets), listing only facts about the products that the content explicitly states: features, materials, sizes, colours, listed prices, and shipping, returns or guarantee statements. Copy each fact as stated, keeping its numbers and units exactly. Never infer, generalise or round: if the page says "reflective strips", do not write "visible at night"; if it lists sizes S and M, do not write "all sizes". Leave out marketing opinions ("the best harness ever"), reviews and testimonials. Return an empty string if the content states no such facts.
 - confidence: "high" if the content clearly describes the business and most fields are directly supported; "medium" if some fields rest on limited content; "low" if the content is thin, ambiguous, or mostly not about the business.`;
 
 /** Stops scraped text from closing our delimiter tag early. */

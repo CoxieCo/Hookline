@@ -269,7 +269,14 @@ function IdeaCard({ idea, onChange }: { idea: Idea; onChange: (id: string, next:
         </div>
       )}
 
-      <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-4">
+      {idea.claims_to_verify?.length > 0 && <ClaimsToVerify claims={idea.claims_to_verify} />}
+
+      {/* On every card: the flags above catch some unsupported claims, not all of them. */}
+      <p className="mt-4 text-xs text-muted" data-testid="idea-standing-reminder">
+        Check this matches your product before you post it.
+      </p>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-4">
         <Button
           type="button"
           variant={saved ? "primary" : "secondary"}
@@ -290,6 +297,25 @@ function IdeaCard({ idea, onChange }: { idea: Idea; onChange: (id: string, next:
         )}
       </div>
     </article>
+  );
+}
+
+function ClaimsToVerify({ claims }: { claims: string[] }) {
+  return (
+    <div
+      data-testid="claims-to-verify"
+      className="mt-5 rounded-md border border-warning/30 bg-warning/10 px-3 py-2.5 text-[13px] leading-relaxed"
+    >
+      <h4 className="font-medium text-warning">Check before posting</h4>
+      <p className="mt-0.5 text-muted">
+        These aren&apos;t in your product facts or profile. Make sure they&apos;re true, or cut them, before you post.
+      </p>
+      <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-fg marker:text-warning">
+        {claims.map((claim, i) => (
+          <li key={i}>{claim}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

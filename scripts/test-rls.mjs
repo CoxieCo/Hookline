@@ -226,6 +226,46 @@ for (const value of ["tiktok", "", "Website"]) {
   });
 }
 
+// --- product_facts ----------------------------------------------------------
+console.log("\nbusiness_profiles.product_facts\n");
+
+await check("product_facts defaults to '' (not NULL) on rows that don't set it", async () => {
+  const { rows } = await as(B, `select product_facts from business_profiles`);
+  assert(rows.length === 1 && rows[0].product_facts === "", JSON.stringify(rows));
+});
+
+await check("user A can save product_facts on their own profile (upsert)", async () => {
+  await as(A, `
+    insert into business_profiles (user_id, business_name, source_type, product_facts)
+    values ($1, 'Paws & Co', 'manual', $2)
+    on conflict (user_id) do update set product_facts = excluded.product_facts`,
+    [A, "Waterproof harness\nSizes S-L"]);
+  const { rows } = await as(A, `select product_facts from business_profiles`);
+  assert(rows.length === 1 && rows[0].product_facts === "Waterproof harness\nSizes S-L", JSON.stringify(rows));
+});
+
+await check("user B cannot read user A's product_facts", async () => {
+  const { rows } = await as(B, `select product_facts from business_profiles where user_id = $1`, [A]);
+  assert(rows.length === 0, `saw ${rows.length} rows`);
+});
+
+await check("user B's update of user A's product_facts affects 0 rows", async () => {
+  const { affectedRows } = await as(B,
+    `update business_profiles set product_facts = 'planted claim' where user_id = $1`, [A]);
+  assert(affectedRows === 0, `affected ${affectedRows}`);
+  const { rows } = await as(A, `select product_facts from business_profiles`);
+  assert(rows[0].product_facts === "Waterproof harness\nSizes S-L", JSON.stringify(rows));
+});
+
+await check("product_facts cannot be NULL", async () => {
+  await rejects(as(A, `update business_profiles set product_facts = null`), /null value|not-null/);
+});
+
+await check("anon cannot read product_facts", async () => {
+  const { rows } = await as(null, `select product_facts from business_profiles`);
+  assert(rows.length === 0, `saw ${rows.length} rows`);
+});
+
 // --- extraction rate limit ------------------------------------------------
 console.log("\nextraction rate limit\n");
 
@@ -371,6 +411,7 @@ for (const [column, value] of [
   ["batch_id", `'${BATCH_B}'`],
   ["created_at", "now() - interval '1 year'"],
   ["user_id", `'${B}'`],
+  ["claims_to_verify", `'[]'::jsonb`],
 ]) {
   await check(`user A cannot change ${column} on their own idea`, async () => {
     await rejects(
@@ -387,6 +428,66 @@ await check("a status update bundled with a hook change is rejected as a whole",
   );
   const { rows } = await db.query(`select status, hook from generated_ideas where id = $1`, [ideaA]);
   assert(rows[0].status === "new" && rows[0].hook === "A's hook", JSON.stringify(rows));
+});
+
+await check("claims_to_verify defaults to an empty array", async () => {
+  const { rows } = await as(A, `select claims_to_verify from generated_ideas where id = $1`, [ideaA]);
+  assert(JSON.stringify(rows[0].claims_to_verify) === "[]", JSON.stringify(rows));
+});
+
+let ideaWithClaims = "";
+const CLAIMS = ["Lasts 10 hours", "“5 km” (script beat 2)"];
+
+await check("the server can insert an idea with claims_to_verify, and its owner can read them", async () => {
+  ideaWithClaims = (await as(SERVICE, `
+    insert into generated_ideas (user_id, batch_id, hook, script_beats, filming_instructions, format, claims_to_verify)
+    values ($1, $2, 'claims hook', '["a","b","c"]'::jsonb, 'x', 'POV', $3::jsonb) returning id`,
+    [A, BATCH_A, JSON.stringify(CLAIMS)])).rows[0].id;
+  const { rows } = await as(A, `select claims_to_verify from generated_ideas where id = $1`, [ideaWithClaims]);
+  assert(JSON.stringify(rows[0].claims_to_verify) === JSON.stringify(CLAIMS), JSON.stringify(rows));
+});
+
+await check("user A cannot clear the claims on their own idea (alone or bundled with a status change)", async () => {
+  await rejects(
+    as(A, `update generated_ideas set claims_to_verify = '[]'::jsonb where id = $1`, [ideaWithClaims]),
+    /permission denied/,
+  );
+  await rejects(
+    as(A, `update generated_ideas set status = 'saved', claims_to_verify = '[]'::jsonb where id = $1`, [ideaWithClaims]),
+    /permission denied/,
+  );
+  const { rows } = await db.query(`select status, claims_to_verify from generated_ideas where id = $1`, [ideaWithClaims]);
+  assert(rows[0].status === "new" && rows[0].claims_to_verify.length === 2, JSON.stringify(rows));
+});
+
+await check("user A can still change the status of an idea that has claims", async () => {
+  const { affectedRows } = await as(A, `update generated_ideas set status = 'saved' where id = $1`, [ideaWithClaims]);
+  assert(affectedRows === 1, `affected ${affectedRows}`);
+});
+
+await check("user B cannot read user A's claims_to_verify", async () => {
+  const { rows } = await as(B, `select claims_to_verify from generated_ideas where id = $1`, [ideaWithClaims]);
+  assert(rows.length === 0, `saw ${rows.length} rows`);
+});
+
+await check("status is the ONLY column authenticated can update (column privileges)", async () => {
+  const { rows: cols } = await db.query(`
+    select column_name from information_schema.column_privileges
+    where table_schema = 'public' and table_name = 'generated_ideas'
+      and grantee = 'authenticated' and privilege_type = 'UPDATE'
+    order by column_name`);
+  assert(JSON.stringify(cols.map((r) => r.column_name)) === '["status"]', JSON.stringify(cols));
+  const { rows: table } = await db.query(
+    `select has_table_privilege('authenticated', 'public.generated_ideas', 'UPDATE') as t`);
+  assert(table[0].t === false, "authenticated has table-wide UPDATE");
+});
+
+await check("claims_to_verify must be a JSON array, even for the server", async () => {
+  await rejects(
+    as(SERVICE, `insert into generated_ideas (user_id, batch_id, hook, script_beats, filming_instructions, format, claims_to_verify)
+                 values ($1, $2, 'x', '[]'::jsonb, 'x', 'x', '"just a string"'::jsonb)`, [A, BATCH_A]),
+    /generated_ideas_claims_to_verify_is_array/,
+  );
 });
 
 await check("anon (signed out) cannot read ideas", async () => {

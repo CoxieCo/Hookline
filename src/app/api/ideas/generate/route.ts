@@ -10,7 +10,7 @@ import {
 import { generateIdeasWithClaude } from "@/lib/ideas/model";
 import { RECENT_HOOKS_LIMIT } from "@/lib/ideas/prompt";
 import { IDEA_COLUMNS, type Idea } from "@/lib/ideas/schema";
-import { PROFILE_FIELDS, type ProfileValues } from "@/lib/profile/schema";
+import { PROFILE_FIELDS, type ProfileWithFacts } from "@/lib/profile/schema";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -39,7 +39,7 @@ export async function POST() {
   // RLS scopes this to the signed-in user's row.
   const { data: profile, error: profileError } = await supabase
     .from("business_profiles")
-    .select("business_name, industry, product_description, target_customer, brand_tone")
+    .select("business_name, industry, product_description, target_customer, brand_tone, product_facts")
     .maybeSingle();
   if (profileError) {
     console.error("[ideas] profile load failed", profileError.message);
@@ -74,8 +74,8 @@ export async function POST() {
   }
 
   const profileValues = Object.fromEntries(
-    PROFILE_FIELDS.map((field) => [field, (profile as Record<string, string | null>)[field] ?? ""]),
-  ) as ProfileValues;
+    [...PROFILE_FIELDS, "product_facts"].map((field) => [field, (profile as Record<string, string | null>)[field] ?? ""]),
+  ) as ProfileWithFacts;
 
   let generated;
   try {
@@ -102,6 +102,7 @@ export async function POST() {
     caption: idea.caption,
     duration_seconds: idea.duration_seconds,
     trend_name: idea.trend_name || null,
+    claims_to_verify: idea.claims_to_verify,
   }));
 
   try {

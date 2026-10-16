@@ -15,6 +15,7 @@ const idea = (overrides: Record<string, unknown> = {}) => ({
   trend_name: "POV",
   caption: "Built for the chewers 🐾 #dogsoftiktok",
   duration_seconds: 15,
+  claims_to_verify: ["Survives a husky's chewing"],
   ...overrides,
 });
 const batch = (n = 5, overrides: Record<string, unknown> = {}) => ({
@@ -40,7 +41,7 @@ describe("GeneratedBatchSchema (model output re-validation)", () => {
     expect(GeneratedBatchSchema.safeParse({ ...batch(), note: "hi" }).success).toBe(false);
   });
 
-  it.each(["hook", "script_beats", "filming_instructions", "format", "trend_name", "caption", "duration_seconds"])(
+  it.each(["hook", "script_beats", "filming_instructions", "format", "trend_name", "caption", "duration_seconds", "claims_to_verify"])(
     "rejects an idea missing %s",
     (field) => {
       const bad = idea();
@@ -89,6 +90,39 @@ describe("GeneratedBatchSchema (model output re-validation)", () => {
 
   it("trims text fields", () => {
     expect(GeneratedIdeaSchema.parse(idea({ hook: "  Hello  \n" })).hook).toBe("Hello");
+  });
+});
+
+describe("claims_to_verify", () => {
+  it("accepts an empty list", () => {
+    expect(GeneratedIdeaSchema.parse(idea({ claims_to_verify: [] })).claims_to_verify).toEqual([]);
+  });
+
+  it("trims, collapses whitespace, and drops blanks and case-insensitive duplicates", () => {
+    const out = GeneratedIdeaSchema.parse(
+      idea({ claims_to_verify: ["  Lasts 10 hours ", "", "   ", "lasts 10 hours", "Machine\n washable"] }),
+    );
+    expect(out.claims_to_verify).toEqual(["Lasts 10 hours", "Machine washable"]);
+  });
+
+  it("clips an over-long claim instead of failing the batch", () => {
+    const out = GeneratedIdeaSchema.parse(idea({ claims_to_verify: ["x".repeat(1000)] }));
+    expect(out.claims_to_verify[0]).toHaveLength(300);
+    expect(out.claims_to_verify[0].endsWith("…")).toBe(true);
+  });
+
+  it("keeps at most 20 claims", () => {
+    const many = Array.from({ length: 30 }, (_, i) => `claim ${i}`);
+    expect(GeneratedIdeaSchema.parse(idea({ claims_to_verify: many })).claims_to_verify).toHaveLength(20);
+  });
+
+  it.each([["a string", "Lasts 10 hours"], ["numbers", [1, 2]], ["null", null]])("rejects %s", (_label, value) => {
+    expect(GeneratedIdeaSchema.safeParse(idea({ claims_to_verify: value })).success).toBe(false);
+  });
+
+  it("is part of the schema sent to the model, after the content fields", () => {
+    const keys = Object.keys(ModelBatchSchema.shape.ideas.element.shape);
+    expect(keys.at(-1)).toBe("claims_to_verify");
   });
 });
 

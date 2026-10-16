@@ -19,6 +19,8 @@ export const IDEA_LIMITS = {
   caption: 149,
   minDuration: 7,
   maxDuration: 45,
+  claim: 300,
+  maxClaims: 20,
 } as const;
 
 /**
@@ -34,6 +36,8 @@ export const ModelIdeaSchema = z.object({
   trend_name: z.string(),
   caption: z.string(),
   duration_seconds: z.int(),
+  // Last, so the model lists the claims in what it has already written.
+  claims_to_verify: z.array(z.string()),
 });
 
 export const ModelBatchSchema = z.object({ ideas: z.array(ModelIdeaSchema) });
@@ -53,6 +57,24 @@ export function normalizeTrendName(value: string): TrendName | "" {
   return (key && TREND_NAMES.find((name) => squash(name) === key)) || "";
 }
 
+/**
+ * Trims, drops blanks and case-insensitive duplicates, and clips over-long
+ * entries. Never fails the batch: a flag the user should see is worth more
+ * than a perfectly formatted one.
+ */
+export function normalizeClaims(claims: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of claims) {
+    const claim = raw.trim().replace(/\s+/g, " ");
+    const key = claim.toLowerCase();
+    if (!claim || seen.has(key)) continue;
+    seen.add(key);
+    out.push(claim.length > IDEA_LIMITS.claim ? `${claim.slice(0, IDEA_LIMITS.claim - 1)}…` : claim);
+  }
+  return out.slice(0, IDEA_LIMITS.maxClaims);
+}
+
 /** Second pass over whatever the model returned: exact shape, counts and limits. */
 export const GeneratedIdeaSchema = z
   .object({
@@ -63,6 +85,7 @@ export const GeneratedIdeaSchema = z
     trend_name: z.string().max(IDEA_LIMITS.format).transform(normalizeTrendName),
     caption: text(IDEA_LIMITS.caption),
     duration_seconds: z.int().min(IDEA_LIMITS.minDuration).max(IDEA_LIMITS.maxDuration),
+    claims_to_verify: z.array(z.string()).transform(normalizeClaims),
   })
   .strict();
 
@@ -88,9 +111,11 @@ export type Idea = {
   caption: string;
   duration_seconds: number | null;
   trend_name: string | null;
+  /** Specific claims not backed by the profile or product facts: "Check before posting". */
+  claims_to_verify: string[];
   status: IdeaStatus;
   created_at: string;
 };
 
 export const IDEA_COLUMNS =
-  "id, batch_id, hook, script_beats, filming_instructions, format, caption, duration_seconds, trend_name, status, created_at";
+  "id, batch_id, hook, script_beats, filming_instructions, format, caption, duration_seconds, trend_name, claims_to_verify, status, created_at";

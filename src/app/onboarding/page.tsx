@@ -13,7 +13,7 @@ export default async function OnboardingPage() {
   const supabase = await createClient();
   const { data: profile, error } = await supabase
     .from("business_profiles")
-    .select("business_name, industry, product_description, target_customer, brand_tone, source_type, source_url")
+    .select("business_name, industry, product_description, target_customer, brand_tone, product_facts, source_type, source_url")
     .maybeSingle();
   if (error) throw new Error(`Failed to load business profile: ${error.message}`);
 
@@ -27,6 +27,7 @@ export default async function OnboardingPage() {
           target_customer: profile.target_customer ?? "",
           brand_tone: profile.brand_tone ?? "",
         },
+        productFacts: profile.product_facts ?? "",
         sourceType: (SOURCE_TYPES as readonly string[]).includes(profile.source_type ?? "")
           ? (profile.source_type as SourceType)
           : "manual",

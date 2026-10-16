@@ -29,7 +29,39 @@ export const FIELD_LABELS: Record<ProfileField, string> = {
   brand_tone: "Brand tone",
 };
 
-export const SOURCE_TYPES = ["website", "social", "manual"] as const;
+/**
+ * Product facts: short lines the owner confirms are true and is happy to say
+ * in videos. Optional (may be ""), so it isn't one of the required
+ * PROFILE_FIELDS; it's the main source of product specifics for idea generation.
+ */
+export const PRODUCT_FACTS_LIMIT = 1500;
+export const PRODUCT_FACTS_LABEL = "Product facts";
+
+/** The profile as idea generation sees it. */
+export type ProfileWithFacts = ProfileValues & { product_facts: string };
+
+const PLACEHOLDER_RE = /^(n\/?a|unknown|none|not (specified|available|provided|stated)|-+)$/i;
+
+/**
+ * One fact per line: normalises line endings, strips bullet markers and
+ * placeholder lines, and drops whole lines (never half a fact) past `max`.
+ */
+export function cleanProductFacts(text: string, max = PRODUCT_FACTS_LIMIT) {
+  const lines = text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[-*•·]|\d+[.)])\s+/, "").trim())
+    .filter((line) => line && !PLACEHOLDER_RE.test(line));
+  let out = "";
+  for (const line of lines) {
+    const next = out ? `${out}\n${line}` : line;
+    if (next.length > max) break;
+    out = next;
+  }
+  return out;
+}
+
+export const SOURCE_TYPES =["website", "social", "manual"] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 export const CONFIDENCE = ["high", "medium", "low"] as const;
@@ -53,6 +85,7 @@ export const ModelExtractionSchema = z.object({
   product_description: z.string(),
   target_customer: z.string(),
   brand_tone: z.string(),
+  product_facts: z.string(),
   confidence: z.enum(CONFIDENCE),
 });
 
@@ -64,7 +97,7 @@ const cleanModelString = (max: number) =>
   z
     .string()
     .transform((s) => s.trim())
-    .transform((s) => (/^(n\/?a|unknown|none|not (specified|available|provided)|-+)$/i.test(s) ? "" : s))
+    .transform((s) => (PLACEHOLDER_RE.test(s) ? "" : s))
     .transform((s) => s.slice(0, max));
 
 export const ExtractedProfileSchema = z
@@ -74,6 +107,7 @@ export const ExtractedProfileSchema = z
     product_description: cleanModelString(FIELD_LIMITS.product_description),
     target_customer: cleanModelString(FIELD_LIMITS.target_customer),
     brand_tone: cleanModelString(FIELD_LIMITS.brand_tone),
+    product_facts: z.string().transform((s) => cleanProductFacts(s)),
     confidence: z.enum(CONFIDENCE),
   })
   .strict();
@@ -95,6 +129,15 @@ export const ProfileFormSchema = z
     product_description: requiredField("product_description"),
     target_customer: requiredField("target_customer"),
     brand_tone: requiredField("brand_tone"),
+    // Optional. Line endings are normalised first so a textarea's \r\n
+    // doesn't count double against the limit.
+    product_facts: z
+      .string()
+      .optional()
+      .transform((s) => (s ?? "").replace(/\r\n?/g, "\n").trim())
+      .pipe(
+        z.string().max(PRODUCT_FACTS_LIMIT, `${PRODUCT_FACTS_LABEL} must be ${PRODUCT_FACTS_LIMIT} characters or fewer.`),
+      ),
     source_type: z.enum(SOURCE_TYPES, { error: "Invalid profile source." }),
     source_url: z
       .string()

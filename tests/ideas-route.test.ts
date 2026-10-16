@@ -57,6 +57,7 @@ const profileRow = {
   product_description: "Reflective leads",
   target_customer: "Dog walkers",
   brand_tone: "warm",
+  product_facts: "Reflective strips\nSizes S-L",
 };
 const idea: GeneratedIdea = {
   hook: "Hook",
@@ -66,6 +67,7 @@ const idea: GeneratedIdea = {
   trend_name: "",
   caption: "Caption",
   duration_seconds: 12,
+  claims_to_verify: [],
 };
 
 async function call() {
@@ -146,9 +148,27 @@ describe("POST /api/ideas/generate", () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it("sends the profile and recent hooks to the model", async () => {
+  it("sends the profile, product facts and recent hooks to the model", async () => {
     await call();
     expect(generate).toHaveBeenCalledWith(profileRow, ["old hook 1", "old hook 2"]);
+  });
+
+  it("a NULL product_facts reaches the model as an empty string", async () => {
+    profileResult = { data: { ...profileRow, product_facts: null }, error: null };
+    await call();
+    expect(generate.mock.calls[0][0].product_facts).toBe("");
+  });
+
+  it("stores each idea's claims_to_verify", async () => {
+    generate.mockResolvedValue([
+      { ...idea, claims_to_verify: ["Lasts 10 hours", "“5 km” (script beat 2)"] },
+      ...Array.from({ length: 4 }, () => idea),
+    ]);
+    await call();
+    const insert = adminFrom.mock.calls[0][1].insert as ReturnType<typeof vi.fn>;
+    const rows = insert.mock.calls[0][0] as Record<string, unknown>[];
+    expect(rows[0].claims_to_verify).toEqual(["Lasts 10 hours", "“5 km” (script beat 2)"]);
+    expect(rows[1].claims_to_verify).toEqual([]);
   });
 
   it("model_failed is passed through, nothing is inserted", async () => {

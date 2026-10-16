@@ -1,13 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useActionState, useRef, useState } from "react";
+import { Fragment, useActionState, useRef, useState } from "react";
 import type { ExtractResponse } from "@/app/api/profile/extract/route";
 import { Button, Input, Label, Textarea } from "@/components/ui";
 import {
   EMPTY_PROFILE,
   FIELD_LABELS,
   FIELD_LIMITS,
+  PRODUCT_FACTS_LABEL,
+  PRODUCT_FACTS_LIMIT,
   PROFILE_FIELDS,
   type Confidence,
   type ProfileField,
@@ -18,6 +20,8 @@ import { saveProfile } from "./actions";
 
 export type SavedProfile = {
   values: ProfileValues;
+  /** Optional, so kept apart from the required fields in `values`. */
+  productFacts: string;
   sourceType: SourceType;
   sourceUrl: string | null;
 };
@@ -33,7 +37,13 @@ type Step =
   | { name: "loading"; target: string }
   | { name: "review"; draft: Draft };
 
-const MANUAL_DRAFT: Draft = { values: EMPTY_PROFILE, sourceType: "manual", sourceUrl: null, origin: "manual" };
+const MANUAL_DRAFT: Draft = {
+  values: EMPTY_PROFILE,
+  productFacts: "",
+  sourceType: "manual",
+  sourceUrl: null,
+  origin: "manual",
+};
 
 function describeTarget(input: string) {
   const trimmed = input.trim();
@@ -86,6 +96,7 @@ export function OnboardingFlow({ saved }: { saved: SavedProfile | null }) {
             target_customer: data.profile.target_customer,
             brand_tone: data.profile.brand_tone,
           },
+          productFacts: data.profile.product_facts,
           sourceType: data.source.type,
           sourceUrl: data.source.url,
           origin: "ai",
@@ -229,6 +240,7 @@ function listFields(fields: ProfileField[]) {
 
 function ReviewStep({ draft, onStartOver }: { draft: Draft; onStartOver: () => void }) {
   const [values, setValues] = useState<ProfileValues>(draft.values);
+  const [productFacts, setProductFacts] = useState(draft.productFacts);
   const [state, action, pending] = useActionState(saveProfile, undefined);
 
   const emptyFields = PROFILE_FIELDS.filter((f) => !values[f].trim());
@@ -293,21 +305,31 @@ function ReviewStep({ draft, onStartOver }: { draft: Draft; onStartOver: () => v
               setValues((v) => ({ ...v, [field]: e.target.value })),
           };
           return (
-            <div key={field} className="space-y-1.5">
-              <Label htmlFor={field}>{FIELD_LABELS[field]}</Label>
-              {MULTILINE.includes(field) ? (
-                <Textarea rows={field === "product_description" ? 4 : 3} {...common} />
-              ) : field === "brand_tone" ? (
-                <Textarea rows={2} placeholder="e.g. playful, confident, casual" {...common} />
-              ) : (
-                <Input {...common} />
+            <Fragment key={field}>
+              <div className="space-y-1.5">
+                <Label htmlFor={field}>{FIELD_LABELS[field]}</Label>
+                {MULTILINE.includes(field) ? (
+                  <Textarea rows={field === "product_description" ? 4 : 3} {...common} />
+                ) : field === "brand_tone" ? (
+                  <Textarea rows={2} placeholder="e.g. playful, confident, casual" {...common} />
+                ) : (
+                  <Input {...common} />
+                )}
+                {error && (
+                  <p id={`${field}-error`} className="text-[13px] text-danger">
+                    {error}
+                  </p>
+                )}
+              </div>
+              {field === "product_description" && (
+                <ProductFactsField
+                  value={productFacts}
+                  onChange={setProductFacts}
+                  error={state?.fieldErrors?.product_facts}
+                  fromPage={draft.origin === "ai"}
+                />
               )}
-              {error && (
-                <p id={`${field}-error`} className="text-[13px] text-danger">
-                  {error}
-                </p>
-              )}
-            </div>
+            </Fragment>
           );
         })}
 
@@ -326,6 +348,65 @@ function ReviewStep({ draft, onStartOver }: { draft: Draft; onStartOver: () => v
           </Button>
         </div>
       </form>
+    </div>
+  );
+}
+
+function ProductFactsField({
+  value,
+  onChange,
+  error,
+  fromPage,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  error?: string;
+  fromPage: boolean;
+}) {
+  const empty = !value.trim();
+  const describedBy = ["product_facts-help", empty && "product_facts-empty", error && "product_facts-error"]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="product_facts">
+        {PRODUCT_FACTS_LABEL}: things that are true about your product and that you&apos;re happy to say in videos
+      </Label>
+      <Textarea
+        id="product_facts"
+        name="product_facts"
+        rows={4}
+        value={value}
+        maxLength={PRODUCT_FACTS_LIMIT}
+        placeholder={"Waterproof\nReflective strips on both sides\nSizes S, M and L"}
+        aria-invalid={Boolean(error)}
+        aria-describedby={describedBy}
+        className={error ? "border-danger" : undefined}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <p id="product_facts-help" className="text-[13px] leading-relaxed text-subtle">
+        One per line: features, materials, sizes, colours, prices, shipping or guarantees. Ideas are written to use
+        product details from this list and the fields above, with a [placeholder] for anything else. They can still
+        get things wrong, so check each one before you post it.
+      </p>
+      {empty && (
+        <p
+          id="product_facts-empty"
+          role="status"
+          data-testid="product-facts-empty"
+          className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[13px] leading-relaxed text-fg"
+        >
+          {fromPage ? "We didn't find any product facts on your page. " : "No product facts yet. "}
+          Without them, ideas are written to avoid specifics like sizes, materials or prices and use placeholders
+          instead.
+        </p>
+      )}
+      {error && (
+        <p id="product_facts-error" className="text-[13px] text-danger">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

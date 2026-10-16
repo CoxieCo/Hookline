@@ -3,9 +3,10 @@ import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { acceptsSampling, CLAUDE_MODEL } from "@/lib/claude";
-import type { ProfileValues } from "@/lib/profile/schema";
+import type { ProfileWithFacts } from "@/lib/profile/schema";
 import { IdeasError } from "./errors";
 import { fakeIdeas, fakeModelEnabled } from "./fake";
+import { applyNumberCheck } from "./grounding";
 import { buildIdeasUserPrompt, IDEAS_SYSTEM_PROMPT } from "./prompt";
 import { GeneratedBatchSchema, ModelBatchSchema, type GeneratedIdea } from "./schema";
 
@@ -15,16 +16,30 @@ export const IDEAS_TEMPERATURE = 0.8;
 // One attempt, bounded so the route (maxDuration 90s) always gets to answer.
 const MODEL_TIMEOUT_MS = 80_000;
 
-export async function generateIdeasWithClaude(profile: ProfileValues, recentHooks: string[]): Promise<GeneratedIdea[]> {
-  if (fakeModelEnabled()) return fakeIdeas();
+// Room for five ideas plus their claim lists, and for the thinking tokens that
+// newer models (which think by default) count against max_tokens. Still small
+// enough for a non-streaming request.
+const MAX_TOKENS = 16_000;
 
-  const client = new Anthropic({ timeout: MODEL_TIMEOUT_MS, maxRetries: 0 });
+export type ModelIdeas = {
+  /** Validated, but before the server's own number check. */
+  ideas: GeneratedIdea[];
+  usage: { input_tokens: number; output_tokens: number };
+};
+
+/** The Claude call alone. Exported for scripts/sample-ideas.ts; the app uses generateIdeasWithClaude. */
+export async function requestIdeasFromClaude(
+  profile: ProfileWithFacts,
+  recentHooks: string[],
+  { timeoutMs = MODEL_TIMEOUT_MS }: { timeoutMs?: number } = {},
+): Promise<ModelIdeas> {
+  const client = new Anthropic({ timeout: timeoutMs, maxRetries: 0 });
 
   let response;
   try {
     response = await client.messages.parse({
       model: CLAUDE_MODEL,
-      max_tokens: 8192,
+      max_tokens: MAX_TOKENS,
       ...(acceptsSampling() ? { temperature: IDEAS_TEMPERATURE } : {}),
       system: IDEAS_SYSTEM_PROMPT,
       messages: [{ role: "user", content: buildIdeasUserPrompt(profile, recentHooks) }],
@@ -47,5 +62,18 @@ export async function generateIdeasWithClaude(profile: ProfileValues, recentHook
   if (!result.success) {
     throw new IdeasError("model_failed", `invalid output: ${result.error.message}`);
   }
-  return result.data.ideas;
+  return {
+    ideas: result.data.ideas,
+    usage: { input_tokens: response.usage?.input_tokens ?? 0, output_tokens: response.usage?.output_tokens ?? 0 },
+  };
+}
+
+/**
+ * Five validated ideas. claims_to_verify holds the model's own list plus any
+ * number the server's check found that the profile and product facts don't
+ * contain. Flags never fail or regenerate the batch.
+ */
+export async function generateIdeasWithClaude(profile: ProfileWithFacts, recentHooks: string[]): Promise<GeneratedIdea[]> {
+  const ideas = fakeModelEnabled() ? fakeIdeas() : (await requestIdeasFromClaude(profile, recentHooks)).ideas;
+  return applyNumberCheck(ideas, profile);
 }

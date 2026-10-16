@@ -54,8 +54,12 @@ test.describe("signed-in flow", () => {
   const password = `E2e-${crypto.randomUUID()}`;
   let userId = "";
   let page: Page;
-
   test.beforeAll(async ({ browser }) => {
+    // /onboarding reads business_profiles.product_facts. The migration is required: a missing column fails, never skips.
+    const probe = await admin("/rest/v1/business_profiles?select=product_facts&limit=0");
+    console.log(`business_profiles.product_facts present: ${probe.status === 200} (HTTP ${probe.status})`);
+    expect(probe.status, "business_profiles.product_facts must exist: apply 20261014000000_product_facts_and_claims.sql").toBe(200);
+
     const res = await admin("/auth/v1/admin/users", {
       method: "POST",
       body: JSON.stringify({ email, password, email_confirm: true }),
@@ -125,8 +129,23 @@ test.describe("signed-in flow", () => {
     await page.getByRole("button", { name: "I'd rather type it myself" }).click();
     await expect(page.getByRole("heading", { name: "Review your profile" })).toBeVisible();
     for (const label of ["Business name", "Industry", "Product description", "Target customer", "Brand tone"]) {
-      await expect(page.getByLabel(label)).toHaveValue("");
+      await expect(page.getByLabel(label, { exact: true })).toHaveValue("");
     }
+    // Product facts: optional, with helper text and a notice while it's empty.
+    const facts = page.getByLabel(/^Product facts: things that are true about your product/);
+    await expect(facts).toHaveValue("");
+    await expect(facts).toHaveAttribute("maxlength", "1500");
+    await expect(facts).not.toHaveAttribute("required");
+    const help = page.getByText(/One per line: features, materials, sizes/);
+    await expect(help).toBeVisible();
+    // Says the ideas can be wrong; never that they only ever state these facts.
+    await expect(help).toContainText("They can still get things wrong, so check each one before you post it.");
+    await expect(help).not.toContainText("only state");
+    await expect(page.getByTestId("product-facts-empty")).toContainText("No product facts yet");
+    await facts.fill("Natural rubber");
+    await expect(page.getByTestId("product-facts-empty")).toHaveCount(0);
+    await facts.fill("");
+    await expect(page.getByTestId("product-facts-empty")).toBeVisible();
     await expect(page.getByRole("button", { name: "Save and continue" })).toBeVisible();
     await shot(page, "c-manual-form");
   });
@@ -139,10 +158,14 @@ test.describe("signed-in flow", () => {
     "Brand tone": "playful, confident",
   };
 
+  // Typed with real line breaks; saved with \n (the browser submits \r\n).
+  const productFacts = "Natural rubber\nSizes S, M and L\nFloats in water";
+
   test("(d) saving the manual form creates a row and lands on /dashboard with the summary", async () => {
     for (const [label, value] of Object.entries(profile)) {
-      await page.getByLabel(label).fill(value);
+      await page.getByLabel(label, { exact: true }).fill(value);
     }
+    await page.getByLabel(/^Product facts:/).fill(productFacts);
     await page.getByRole("button", { name: "Save and continue" }).click();
     await page.waitForURL(/\/dashboard$/);
 
@@ -153,10 +176,19 @@ test.describe("signed-in flow", () => {
     await expect(page.getByTestId("profile-empty")).toHaveCount(0);
 
     const rows = await (
-      await admin(`/rest/v1/business_profiles?user_id=eq.${userId}&select=business_name,industry,source_type,source_url`)
+      await admin(
+        `/rest/v1/business_profiles?user_id=eq.${userId}&select=business_name,industry,source_type,source_url,product_facts`,
+      )
     ).json();
+    console.log(`saved row: ${JSON.stringify(rows)}`);
     expect(rows).toEqual([
-      { business_name: "E2E Paws Co", industry: "Pet supplies", source_type: "manual", source_url: null },
+      {
+        business_name: "E2E Paws Co",
+        industry: "Pet supplies",
+        source_type: "manual",
+        source_url: null,
+        product_facts: productFacts,
+      },
     ]);
 
     // Reloading must keep showing the summary, not redirect again.
@@ -173,8 +205,43 @@ test.describe("signed-in flow", () => {
     await expect(page.getByRole("heading", { name: "Review your profile" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Tell us about your business" })).toHaveCount(0);
     for (const [label, value] of Object.entries(profile)) {
-      await expect(page.getByLabel(label)).toHaveValue(value);
+      await expect(page.getByLabel(label, { exact: true })).toHaveValue(value);
     }
+    await expect(page.getByLabel(/^Product facts:/)).toHaveValue(productFacts);
+    await expect(page.getByTestId("product-facts-empty")).toHaveCount(0);
     await shot(page, "e-edit-profile-prefilled");
+  });
+
+  test("(h) editing product facts saves and pre-fills again; clearing them is allowed", async () => {
+    await page.goto("/onboarding");
+    const facts = page.getByLabel(/^Product facts:/);
+    await facts.fill("Natural rubber\nSizes S-L");
+    await page.getByRole("button", { name: "Save and continue" }).click();
+    await page.waitForURL(/\/dashboard$/);
+    await page.goto("/onboarding");
+    await expect(page.getByLabel(/^Product facts:/)).toHaveValue("Natural rubber\nSizes S-L");
+
+    await page.getByLabel(/^Product facts:/).fill("");
+    await page.getByRole("button", { name: "Save and continue" }).click();
+    await page.waitForURL(/\/dashboard$/);
+    const rows = await (await admin(`/rest/v1/business_profiles?user_id=eq.${userId}&select=product_facts`)).json();
+    expect(rows).toEqual([{ product_facts: "" }]);
+    await page.goto("/onboarding");
+    await expect(page.getByLabel(/^Product facts:/)).toHaveValue("");
+    await expect(page.getByTestId("product-facts-empty")).toBeVisible();
+    await shot(page, "h-product-facts-empty-notice");
+  });
+
+  test("(i) the server rejects product facts over 1500 characters", async () => {
+    await page.goto("/onboarding");
+    const facts = page.getByLabel(/^Product facts:/);
+    // Bypass the textarea's maxlength, as a crafted request would.
+    await facts.evaluate((el) => el.removeAttribute("maxlength"));
+    await facts.fill("x".repeat(1501));
+    await page.getByRole("button", { name: "Save and continue" }).click();
+    await expect(page.getByText("Product facts must be 1500 characters or fewer.")).toBeVisible();
+    await expect(page).toHaveURL(/\/onboarding$/);
+    const rows = await (await admin(`/rest/v1/business_profiles?user_id=eq.${userId}&select=product_facts`)).json();
+    expect(rows).toEqual([{ product_facts: "" }]);
   });
 });

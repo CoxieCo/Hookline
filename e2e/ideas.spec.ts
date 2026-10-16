@@ -63,8 +63,6 @@ test.describe("signed in", () => {
   const withProfile = { email: `hookline-e2e-ideas-${stamp}@example.com`, password: `E2e-${crypto.randomUUID()}`, id: "" };
   const noProfile = { email: `hookline-e2e-noprof-${stamp}@example.com`, password: `E2e-${crypto.randomUUID()}`, id: "" };
   let page: Page;
-  let migrated = false;
-  const NEEDS_MIGRATION = "generated_ideas does not exist yet: paste the two migrations into the Supabase SQL Editor, then re-run";
   let savedHook = "";
   let dismissedHook = "";
 
@@ -92,10 +90,10 @@ test.describe("signed in", () => {
     (await admin(`/rest/v1/generated_ideas?user_id=eq.${userId}&select=${select}`)).json();
 
   test.beforeAll(async ({ browser }) => {
-    // Tests that need the new tables skip (with a reason) until the migrations are applied.
-    const probe = await admin("/rest/v1/generated_ideas?select=id&limit=1");
-    migrated = probe.status === 200;
-    console.log(`generated_ideas table present: ${migrated} (HTTP ${probe.status})`);
+    // The migrations are required: a missing column fails the suite, never skips it.
+    const probe = await admin("/rest/v1/generated_ideas?select=claims_to_verify&limit=1");
+    console.log(`generated_ideas.claims_to_verify present: ${probe.status === 200} (HTTP ${probe.status})`);
+    expect(probe.status, "generated_ideas.claims_to_verify must exist: apply 20261014000000_product_facts_and_claims.sql").toBe(200);
 
     await createUser(withProfile);
     await createUser(noProfile);
@@ -110,6 +108,7 @@ test.describe("signed in", () => {
         target_customer: "Dog owners who walk in the dark",
         brand_tone: "warm, cheeky",
         source_type: "manual",
+        product_facts: "Waterproof\nReflective strips",
       }),
     });
     expect(res.status, "insert profile").toBe(201);
@@ -130,9 +129,7 @@ test.describe("signed in", () => {
     await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByTestId("profile-summary")).toContainText("E2E Muddy Paws");
-    if (migrated) await expect(page.getByTestId("ideas-empty")).toBeVisible();
-    // Before the migration the history query fails; the page must still work.
-    else await expect(page.getByText(/We couldn.t load your earlier ideas/)).toBeVisible();
+    await expect(page.getByTestId("ideas-empty")).toBeVisible();
 
     const button = page.getByRole("button", { name: "Generate ideas" });
     await expect(button).toBeVisible();
@@ -144,7 +141,6 @@ test.describe("signed in", () => {
   });
 
   test("(b) Generate shows the loading state, then 5 idea cards [model mocked]", async () => {
-    test.skip(!migrated, NEEDS_MIGRATION);
     // Hold the request briefly so the loading state is observable; the server is real.
     await page.route("**/api/ideas/generate", async (route) => {
       await new Promise((r) => setTimeout(r, 1500));
@@ -214,8 +210,114 @@ test.describe("signed in", () => {
     await shot(page, "ideas-b2-five-cards");
   });
 
+  test("(b2) ideas with claims_to_verify show an amber 'Check before posting' row; others don't", async () => {
+    const card = (n: number) => page.getByTestId("idea-card").filter({ hasText: `[Fake idea ${n} ·` });
+
+    // Idea 1: a claim the fake model listed itself.
+    const row1 = card(1).getByTestId("claims-to-verify");
+    await expect(row1).toBeVisible();
+    await expect(row1.getByRole("heading", { name: "Check before posting" })).toBeVisible();
+    await expect(row1).toContainText("These aren't in your product facts or profile.");
+    await expect(row1.locator("li")).toHaveText(["Fake claim: the harness keeps a dog dry for a whole walk"]);
+
+    // Idea 2: a number the fake model did NOT list, added by the server's number check.
+    const row2 = card(2).getByTestId("claims-to-verify");
+    await expect(row2.locator("li")).toHaveText(["“5 km” (script beat 2)"]);
+
+    // Ideas 3-5: nothing to check, so no row.
+    for (const n of [3, 4, 5]) await expect(card(n).getByTestId("claims-to-verify")).toHaveCount(0);
+
+    // Amber, and placed after the caption, before the Save/Dismiss row.
+    const look = await row1.evaluate((el) => {
+      const s = getComputedStyle(el);
+      const card = el.closest('[data-testid="idea-card"]')!;
+      const caption = [...card.querySelectorAll("h4")].find((h) => h.textContent === "Caption")!;
+      const save = [...card.querySelectorAll("button")].find((b) => b.textContent === "Save")!;
+      const y = (n: Element) => n.getBoundingClientRect().top;
+      return {
+        border: s.borderColor,
+        heading: getComputedStyle(el.querySelector("h4")!).color,
+        afterCaption: y(el) > y(caption),
+        beforeSave: y(el) < y(save),
+      };
+    });
+    console.log(`claims row: ${JSON.stringify(look)}`);
+    expect(look.heading).toBe("rgb(226, 163, 54)"); // --color-warning
+    expect(look.afterCaption && look.beforeSave).toBe(true);
+
+    // The same lists are what was stored.
+    const stored: { hook: string; claims_to_verify: string[] }[] = await ideaRows(withProfile.id, "hook,claims_to_verify");
+    const claimsOf = (n: number) => stored.find((r) => r.hook.includes(`[Fake idea ${n} ·`))?.claims_to_verify;
+    console.log(`db claims_to_verify: ${JSON.stringify([1, 2, 3, 4, 5].map(claimsOf))}`);
+    expect(claimsOf(1)).toEqual(["Fake claim: the harness keeps a dog dry for a whole walk"]);
+    expect(claimsOf(2)).toEqual(["“5 km” (script beat 2)"]);
+    expect(claimsOf(3)).toEqual([]);
+
+    // Survives a reload (read back from the database, not client state).
+    await page.reload();
+    await expect(card(2).getByTestId("claims-to-verify").locator("li")).toHaveText(["“5 km” (script beat 2)"]);
+    await row1.scrollIntoViewIfNeeded();
+    await shot(page, "ideas-b3-check-before-posting");
+  });
+
+  test("(b3) a user can't clear claims_to_verify through the status route", async () => {
+    const [target] = (await ideaRows(withProfile.id, "id,hook,claims_to_verify")).filter(
+      (r: { hook: string }) => r.hook.includes("[Fake idea 1 ·"),
+    );
+    const res = await page.request.patch(`/api/ideas/${target.id}`, { data: { status: "saved", claims_to_verify: [] } });
+    console.log(`PATCH with claims_to_verify -> HTTP ${res.status()}`);
+    expect(res.status()).toBe(400);
+    const [after] = (await ideaRows(withProfile.id, "id,status,claims_to_verify")).filter(
+      (r: { id: string }) => r.id === target.id,
+    );
+    expect(after.claims_to_verify).toEqual(target.claims_to_verify);
+    expect(after.status).toBe("new");
+  });
+
+  test("(b4) every card shows a muted 'check this matches your product' reminder; nothing claims ideas are fact-checked", async () => {
+    const cards = page.getByTestId("idea-card");
+    await expect(cards).toHaveCount(5);
+    const reminders = page.getByTestId("idea-standing-reminder");
+    await expect(reminders).toHaveCount(5);
+    for (const card of await cards.all()) {
+      await expect(card.getByTestId("idea-standing-reminder")).toHaveText("Check this matches your product before you post it.");
+      await expect(card.getByTestId("idea-standing-reminder")).toBeVisible();
+    }
+
+    // Muted, not amber; outside the amber row; below it and above Save on a flagged card.
+    const card1 = cards.filter({ hasText: "[Fake idea 1 ·" });
+    const look = await card1.getByTestId("idea-standing-reminder").evaluate((el) => {
+      const card = el.closest('[data-testid="idea-card"]')!;
+      const amber = card.querySelector('[data-testid="claims-to-verify"]')!;
+      const save = [...card.querySelectorAll("button")].find((b) => b.textContent === "Save")!;
+      const y = (n: Element) => n.getBoundingClientRect().top;
+      return {
+        color: getComputedStyle(el).color,
+        background: getComputedStyle(el).backgroundColor,
+        insideAmber: amber.contains(el),
+        belowAmber: y(el) > y(amber),
+        aboveSave: y(el) < y(save),
+      };
+    });
+    console.log(`standing reminder: ${JSON.stringify(look)}`);
+    expect(look.color).toBe("rgb(138, 143, 152)"); // --color-muted
+    expect(look.color).not.toBe("rgb(226, 163, 54)"); // not --color-warning
+    expect(look.background).toBe("rgba(0, 0, 0, 0)");
+    expect(look.insideAmber).toBe(false);
+    expect(look.belowAmber && look.aboveSave).toBe(true);
+
+    // An unflagged card has the reminder but no amber row.
+    const card3 = cards.filter({ hasText: "[Fake idea 3 ·" });
+    await expect(card3.getByTestId("idea-standing-reminder")).toBeVisible();
+    await expect(card3.getByTestId("claims-to-verify")).toHaveCount(0);
+
+    const text = await page.locator("main, body").first().innerText();
+    expect(text).not.toMatch(/fact[- ]?checked|verified|guaranteed accurate|accuracy checked/i);
+    await card1.getByTestId("idea-standing-reminder").scrollIntoViewIfNeeded();
+    await shot(page, "ideas-b4-standing-reminder");
+  });
+
   test("(c) Save and Dismiss persist after a reload", async () => {
-    test.skip(!migrated, NEEDS_MIGRATION);
     const cards = page.getByTestId("idea-card");
     savedHook = (await cards.nth(0).getByTestId("idea-hook").textContent())!.trim();
     dismissedHook = (await cards.nth(1).getByTestId("idea-hook").textContent())!.trim();
@@ -254,7 +356,6 @@ test.describe("signed in", () => {
   });
 
   test("(c2) another user's idea can't be changed through the status route", async ({ browser }) => {
-    test.skip(!migrated, NEEDS_MIGRATION);
     const other = await signIn(browser, noProfile);
     const [target] = await ideaRows(withProfile.id, "id,status");
     const res = await other.request.patch(`/api/ideas/${target.id}`, { data: { status: "dismissed" } });
@@ -282,10 +383,8 @@ test.describe("signed in", () => {
     expect(body.reason).toBe("no_profile");
 
     // No quota was consumed for the failed attempt.
-    if (migrated) {
-      const log = await (await admin(`/rest/v1/idea_generation_log?user_id=eq.${noProfile.id}&select=id`)).json();
-      expect(log).toEqual([]);
-    }
+    const log = await (await admin(`/rest/v1/idea_generation_log?user_id=eq.${noProfile.id}&select=id`)).json();
+    expect(log).toEqual([]);
     await shot(p, "ideas-d-no-profile-onboarding");
     await p.context().close();
   });
@@ -309,7 +408,6 @@ test.describe("signed in", () => {
   });
 
   test("(e) the 6th generation within 24 hours shows the rate-limit message", async () => {
-    test.skip(!migrated, NEEDS_MIGRATION);
     // Batch 1 was (b). Batches 2-5 through the real route with this session.
     for (let i = 2; i <= 5; i++) {
       const res = await page.request.post("/api/ideas/generate");
